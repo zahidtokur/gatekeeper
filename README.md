@@ -12,7 +12,7 @@ docker compose ps
 docker compose logs -f
 ```
 
-On startup, each Django service runs migrations against its own database, then starts Daphne. The gateway waits for the user and order services and Redis to pass their health checks. Continue to handle connection failures and timeouts in your gateway code, since upstream services can become unavailable later.
+On startup, each Django service runs migrations against its own database, then starts Daphne. The gateway waits for the user and order services and Redis to pass their health checks.
 
 | Service | Address | Data volume |
 | --- | --- | --- |
