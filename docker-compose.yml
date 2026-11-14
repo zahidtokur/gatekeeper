@@ -1,0 +1,90 @@
+# Local development / learning environment.
+x-django: &django
+  init: true
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=2)"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 20s
+
+services:
+  gateway:
+    <<: *django
+    build:
+      context: .
+      args:
+        SERVICE: gateway
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,gateway"
+      DATABASE_PATH: /data/db.sqlite3
+      USER_SERVICE_URL: http://user-service:8000
+      ORDER_SERVICE_URL: http://order-service:8000
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      user_service:
+        condition: service_healthy
+      order_service:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - gateway_data:/data
+
+  user_service:
+    <<: *django
+    build:
+      context: .
+      args:
+        SERVICE: user_service
+    ports:
+      - "127.0.0.1:8001:8000"
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,user-service"
+      DATABASE_PATH: /data/db.sqlite3
+    networks:
+      default:
+        aliases: [user-service]
+    volumes:
+      - user_service_data:/data
+
+  order_service:
+    <<: *django
+    build:
+      context: .
+      args:
+        SERVICE: order_service
+    ports:
+      - "127.0.0.1:8002:8000"
+    environment:
+      DJANGO_DEBUG: "1"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,order-service"
+      DATABASE_PATH: /data/db.sqlite3
+    networks:
+      default:
+        aliases: [order-service]
+    volumes:
+      - order_service_data:/data
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  gateway_data:
+  user_service_data:
+  order_service_data:
+  redis_data:
