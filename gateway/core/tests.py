@@ -1,8 +1,13 @@
+import json
+import threading
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingTCPServer
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from django.test import SimpleTestCase, override_settings
 
+from core import http as core_http
 from core.views import GatewayProxy
 
 
@@ -167,3 +172,63 @@ class GatewayProxyTests(SimpleTestCase):
 
                 self.assertEqual(response.status_code, status)
                 self.assertEqual(response.json(), {"detail": "from upstream"})
+
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    def _reply(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.dumps({
+            "method": self.command,
+            "path": self.path,
+            "content_type": self.headers.get("Content-Type"),
+            "body": self.rfile.read(length).decode(),
+        }).encode()
+        self.send_response(201 if self.command == "POST" else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = _reply
+
+    def log_message(self, *args):
+        pass
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"])
+class GatewaySmokeTests(SimpleTestCase):
+    """Real HTTP round trip: gateway -> dummy upstream -> gateway."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.server = ThreadingTCPServer(("127.0.0.1", 0), _EchoHandler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        core_http._client = None  # fresh client bound to this test's event loop
+        services_patch = patch.object(GatewayProxy, "services", {
+            "users": f"{self.base_url}/v1/users/",
+        })
+        services_patch.start()
+        self.addCleanup(services_patch.stop)
+
+    async def test_get_and_post_round_trip(self):
+        response = await self.async_client.get("/api/users/1?q=a")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["path"], "/v1/users/1/?q=a")
+
+        response = await self.async_client.post(
+            "/api/users/", data=b'{"name": "x"}', content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["body"], '{"name": "x"}')
+        self.assertEqual(response.json()["content_type"], "application/json")
+        await core_http._client.aclose()
