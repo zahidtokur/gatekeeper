@@ -16,7 +16,7 @@ class OrderViewsetTests(SimpleTestCase):
             "service": "order-service",
             "method": "GET",
             "path": self.order_retrieve_url,
-            "query_params": {"status": "shipped"},
+            "query_params": {"status": ["shipped"]},
         })
 
     async def test_post_echoes_request_details(self):
@@ -31,7 +31,7 @@ class OrderViewsetTests(SimpleTestCase):
             "method": "POST",
             "path": self.order_create_url,
             "body": {"user_id": "23"},
-            "query_params": {"commit": "true"},
+            "query_params": {"commit": ["true"]},
         })
 
     async def test_disallowed_methods(self):

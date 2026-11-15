@@ -8,7 +8,7 @@ class OrderViewset(ViewSet):
             "service": "order-service",
             "method": request.method,
             "path": request.path,
-            "query_params": request.query_params,
+            "query_params": dict(request.query_params),
         })
 
     async def create(self, request):
@@ -17,5 +17,5 @@ class OrderViewset(ViewSet):
             "method": request.method,
             "path": request.path,
             "body": request.data,
-            "query_params": request.query_params,
+            "query_params": dict(request.query_params),
         })
