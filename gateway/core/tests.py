@@ -138,3 +138,32 @@ class GatewayProxyTests(SimpleTestCase):
 
         _, kwargs = self.upstream.request.call_args
         self.assertEqual(kwargs["headers"], {"content-type": "application/json"})
+
+    async def test_gateway_keeps_serving_after_upstream_failures(self):
+        self.upstream.request.side_effect = [
+            httpx.ConnectError("connection refused"),
+            httpx.ReadTimeout("timed out"),
+            httpx.Response(200, json={"id": 1}),
+        ]
+
+        first = await self.async_client.get("/api/users/1/")
+        second = await self.async_client.get("/api/users/1/")
+        third = await self.async_client.get("/api/users/1/")
+
+        self.assertEqual(first.status_code, 502)
+        self.assertEqual(second.status_code, 504)
+        self.assertEqual(third.status_code, 200)
+        self.assertEqual(third.json(), {"id": 1})
+        self.assertEqual(self.upstream.request.await_count, 3)
+
+    async def test_upstream_5xx_is_not_converted_to_gateway_error(self):
+        for status in (500, 502, 503, 504):
+            with self.subTest(status=status):
+                self.upstream.request.return_value = httpx.Response(
+                    status, json={"detail": "from upstream"}
+                )
+
+                response = await self.async_client.get("/api/users/1/")
+
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.json(), {"detail": "from upstream"})
