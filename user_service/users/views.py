@@ -8,5 +8,5 @@ class UserRetrieve(APIView):
             "service": "user-service",
             "method": request.method,
             "path": request.path,
-            "query_params": request.query_params,
+            "query_params": dict(request.query_params),
         })

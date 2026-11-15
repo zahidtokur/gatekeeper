@@ -16,9 +16,9 @@ class UserRetrieveTests(SimpleTestCase):
             "method": "GET",
             "path": self.url,
             "query_params": {
-                "name": "Ada", 
-                "page": "2", 
-                "active": "true"
+                "name": ["Ada"], 
+                "page": ["2"], 
+                "active": ["true"]
             },
         })
 
