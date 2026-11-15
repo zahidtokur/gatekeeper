@@ -3,3 +3,4 @@ djangorestframework==3.18.3
 redis==8.1.0
 daphne==4.2.3
 httpx==0.28.1
+adrf==0.1.14
