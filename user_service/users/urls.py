@@ -5,5 +5,6 @@ from . import views
 app_name = 'users'
 
 urlpatterns = [
-    path("<int:pk>/", views.UserRetrieve.as_view())
+    path("<int:pk>/", views.UserRetrieve.as_view()),
+    path("slow/", views.SlowResponse.as_view()),
 ]

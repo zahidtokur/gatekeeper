@@ -14,7 +14,7 @@ client ──> gateway (:8000) ──/api/users/...──> user_service (:8001) 
 - The gateway matches `/api/<service>/<path>` against a static route table (`gateway/core/views.py`) and forwards the request with a shared async HTTPX client.
 - The path gets a trailing slash. Query parameters, the request body, and `Content-Type` are forwarded. No other client headers are forwarded.
 - The upstream status code, body, and `Content-Type` are returned unchanged.
-- An unknown service returns `404`. An upstream connection error returns `502`, and an upstream timeout returns `504` (5 s total, 2 s connect).
+- An unknown service returns `404`. An upstream connection error returns `502`, and an upstream timeout returns `504` (2 s to connect, 5 s for each read/write).
 
 ## Running the project
 
@@ -57,11 +57,24 @@ curl -X POST http://localhost:8000/api/orders/ \
   -H "Content-Type: application/json" \
   -d '{"user_id": 1, "items": [{"sku": "a", "qty": 2}]}'
 curl -i http://localhost:8000/api/unknown/   # 404
+curl -i http://localhost:8000/api/users/slow/ # 504 after about 5 s
 ```
 
 ## Running the tests
 
-The gateway tests need no Docker, database, or running services. They need Python 3.13 and the packages in `requirements.txt`:
+The gateway has two kinds of tests:
+
+- `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), and timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s). These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
+- `core/tests.py` (`UpstreamConnectionErrorTests`) mocks the upstream client to test connection errors (502). A running service cannot produce a connection error, so this test needs no Docker.
+
+The easiest way is to run them inside the gateway container:
+
+```sh
+docker compose up --build -d
+docker compose exec gateway python manage.py test core
+```
+
+To run them on the host, you need Python 3.13 and the packages in `requirements.txt`. The e2e tests call `http://localhost:8000` by default; set `GATEWAY_URL` to change it.
 
 ```sh
 python -m venv .venv && source .venv/bin/activate
@@ -70,10 +83,7 @@ cd gateway && cp .env.example .env
 python manage.py test core
 ```
 
-With Docker: `docker compose exec gateway python manage.py test core`
-
-- `GatewayProxyTests` mocks the upstream client and covers routing, GET query parameters, POST bodies and content types, status and body forwarding, 404, 502, and 504.
-- `GatewaySmokeTests` starts a real dummy HTTP upstream on a free local port and sends a real GET and POST through the gateway to it.
+The full run takes about 5 seconds because of the timeout test.
 
 ## Intentionally unsupported
 
