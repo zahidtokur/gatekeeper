@@ -18,9 +18,9 @@ client ──> gateway (:8000) ──/api/users/...──> user_service (:8001) 
 
 ## Client identification and rate-limit policy
 
-The following decisions define the planned rate limiter:
+The gateway enforces an in-memory fixed-window rate limiter.
 
-For local development, the gateway will use the client's resolved IP address as its identifier. Requests with different source IP addresses belong to different clients. Requests sharing an IP address, including clients behind the same NAT, share the same allowance. To test two independent clients, use two distinct source IP addresses; separate processes on the same IP do not count as separate clients.
+For local development, the gateway uses the client's resolved IP address as its identifier. Requests with different source IP addresses belong to different clients. Requests sharing an IP address, including clients behind the same NAT, share the same allowance. To test two independent clients, use two distinct source IP addresses; separate processes on the same IP do not count as separate clients.
 
 This identifier is **not authentication** and provides no proof of identity. IP-based identification can be spoofed, particularly if untrusted forwarding headers are accepted. Do not treat an arbitrary client-supplied IP header as a verified identity.
 
@@ -33,7 +33,27 @@ The default policy uses a fixed 60-second window and separate counters for each 
 
 These limits cover all proxied routes under `/api/users/` and `/api/orders/`, including nested paths. Each client's GET allowance is shared across both services, and its POST allowance is also shared across both services. Switching services or paths does not provide a fresh allowance. GET requests do not consume the POST allowance, and vice versa. Health checks at `/health/` and non-proxy routes are outside this policy; methods other than GET and POST remain unsupported.
 
-If the gateway cannot determine a client's IP address, it will reject the request with **503 Service Unavailable** rather than forward it or assign a shared anonymous identifier.
+If the gateway cannot determine a client's IP address, it rejects the request with **503 Service Unavailable** rather than forward it or assign a shared anonymous identifier:
+
+```json
+{"detail": "Unable to identify client"}
+```
+
+### Rate-limited response
+
+When a client exceeds its allowance, the gateway returns **429 Too Many Requests** and does not forward the request upstream:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 17
+Content-Type: application/json
+
+{"detail": "Rate limit exceeded. Retry after the time in the Retry-After header."}
+```
+
+`Retry-After` is the number of whole seconds until the current fixed window ends, between 1 and 60. Counters reset at window boundaries aligned to the clock (for example, :00 of each minute), not 60 seconds after the client's first request.
+
+All gateway-generated errors (429, 502, 503, 504) use the same `{"detail": "..."}` body.
 
 ## Running the project
 
@@ -84,7 +104,7 @@ curl -i http://localhost:8000/api/users/slow/ # 504 after about 5 s
 The gateway has two kinds of tests:
 
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), and timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s). These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
-- `core/tests.py` (`UpstreamConnectionErrorTests`) mocks the upstream client to test connection errors (502). A running service cannot produce a connection error, so this test needs no Docker.
+- `core/tests.py` needs no Docker. `UpstreamConnectionErrorTests` mocks the upstream client to test connection errors (502), which a running service cannot produce. The rate-limit tests patch the clock, so window expiration is tested without waiting 60 seconds.
 
 The easiest way is to run them inside the gateway container:
 
@@ -109,7 +129,6 @@ The full run takes about 5 seconds because of the timeout test.
 - HTTP methods other than GET and POST
 - Forwarding client headers other than `Content-Type`, or upstream response headers other than `Content-Type`
 - Authentication, caching, retries, load balancing, and dynamic service discovery
-- Rate-limit enforcement (the planned policy is documented above)
 - Streaming request and response bodies, WebSockets, and advanced HTTP edge cases
 - Connection pool tuning beyond the defaults in `gateway/core/http.py`
 

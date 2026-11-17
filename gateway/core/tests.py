@@ -147,6 +147,9 @@ class GatewayRateLimitTests(SimpleTestCase):
 
                 self.assertEqual(response.status_code, 429)
                 self.assertEqual(response.headers["Retry-After"], "17")
+                self.assertEqual(response.data, {
+                    "detail": "Rate limit exceeded. Retry after the time in the Retry-After header."
+                })
                 self.forward.assert_not_awaited()
 
     async def test_missing_ip_returns_503_before_checking_limits_or_forwarding(self):
@@ -155,6 +158,7 @@ class GatewayRateLimitTests(SimpleTestCase):
                 response = await self.request(ip=ip)
 
                 self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.data, {"detail": "Unable to identify client"})
                 self.get_limiter.check.assert_not_called()
                 self.post_limiter.check.assert_not_called()
                 self.forward.assert_not_awaited()
@@ -191,3 +195,55 @@ class GatewayRateLimitTests(SimpleTestCase):
         self.assertEqual(response.status_code, 503)
         self.get_limiter.check.assert_not_called()
         self.forward.assert_not_awaited()
+
+
+class GatewayRateLimitIntegrationTests(SimpleTestCase):
+    """Real limiter and view together; only the clock and the upstream are fake."""
+
+    def setUp(self):
+        clock_patch = patch("core.rate_limiter.time.time", return_value=125)
+        self.clock = clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+        limiter_patch = patch.object(GatewayProxy, "rate_limiters", {
+            "GET": FixedWindowRateLimiter(limit=2, window_size=60),
+        })
+        limiter_patch.start()
+        self.addCleanup(limiter_patch.stop)
+        self.upstream = Mock(spec=httpx.AsyncClient)
+        self.upstream.request = AsyncMock(return_value=httpx.Response(200))
+        client_patch = patch("core.views.get_client", return_value=self.upstream)
+        client_patch.start()
+        self.addCleanup(client_patch.stop)
+        self.factory = APIRequestFactory()
+        self.view = GatewayProxy.as_view()
+
+    async def request(self, ip="192.0.2.1"):
+        request = self.factory.get("/api/users/1/", REMOTE_ADDR=ip)
+        return await self.view(request, service_name="users", path="1/")
+
+    async def test_over_limit_request_is_rejected_without_reaching_upstream(self):
+        self.assertEqual((await self.request()).status_code, 200)
+        self.assertEqual((await self.request()).status_code, 200)
+
+        response = await self.request()
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "55")
+        self.assertEqual(self.upstream.request.await_count, 2)
+
+    async def test_other_client_keeps_its_own_allowance(self):
+        await self.request(ip="192.0.2.1")
+        await self.request(ip="192.0.2.1")
+
+        response = await self.request(ip="192.0.2.2")
+
+        self.assertEqual(response.status_code, 200)
+
+    async def test_allowance_returns_after_window_expires(self):
+        await self.request()
+        await self.request()
+        self.assertEqual((await self.request()).status_code, 429)
+
+        self.clock.return_value = 180
+
+        self.assertEqual((await self.request()).status_code, 200)
