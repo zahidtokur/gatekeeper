@@ -26,15 +26,22 @@ class GatewayProxy(APIView):
     
     async def _process(self, request, service_name, path):
         ip_address = request.META.get("REMOTE_ADDR")
-        
+
         if not ip_address:
-            return Response(status=503)
-        
+            return Response(
+                {"detail": "Unable to identify client"},
+                status=503,
+            )
+
         rate_limiter = self.rate_limiters.get(request.method)
         is_limited, retry_after = rate_limiter.check(ip_address)
         if is_limited:
-            return Response(status=429, headers={"Retry-After": retry_after})
-        
+            return Response(
+                {"detail": "Rate limit exceeded. Retry after the time in the Retry-After header."},
+                status=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+
         upstream_url = self.build_upstream_url(service_name, path)
         headers = {}
         if ct := request.headers.get("content-type"):
