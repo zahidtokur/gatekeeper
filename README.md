@@ -18,7 +18,7 @@ client ──> gateway (:8000) ──/api/users/...──> user_service (:8001) 
 
 ## Client identification and rate-limit policy
 
-The gateway enforces an in-memory fixed-window rate limiter.
+The gateway enforces a fixed-window rate limiter whose counters are stored in Redis, so limits are shared by all gateway processes and survive a gateway restart.
 
 For local development, the gateway uses the client's resolved IP address as its identifier. Requests with different source IP addresses belong to different clients. Requests sharing an IP address, including clients behind the same NAT, share the same allowance. To test two independent clients, use two distinct source IP addresses; separate processes on the same IP do not count as separate clients.
 
@@ -75,6 +75,28 @@ On startup, each Django service runs migrations against its own database, then s
 | redis | redis:6379 within the Docker network | redis_data |
 
 
+## Rate-limit state in Redis
+
+The gateway reads the Redis address from `REDIS_URL` (`redis://redis:6379/0` in Docker Compose). Redis starts with the rest of the stack (`docker compose up -d`), and the gateway waits for it to be healthy. Redis is reachable only inside the Docker network; use `docker compose exec redis redis-cli` to inspect it.
+
+Each counter is one key, `ratelimit:<limiter>:<client IP>:<window start>`, for example `ratelimit:post:172.21.0.1:1794926520`. The key expires when its 60-second window ends, so old keys are removed without manual cleanup. Because the window start is part of the key, a new window automatically uses a new counter.
+
+```sh
+docker compose exec redis redis-cli --scan --pattern 'ratelimit:*'   # list counters
+docker compose exec redis redis-cli GET <key>                         # requests counted in the window
+docker compose exec redis redis-cli TTL <key>                         # seconds until the key expires
+```
+
+To reset all rate limits, for example after manual testing:
+
+```sh
+docker compose exec redis redis-cli --scan --pattern 'ratelimit:*' | xargs docker compose exec -T redis redis-cli DEL
+# or wipe the whole Redis database:
+docker compose exec redis redis-cli FLUSHDB
+```
+
+Restarting the gateway (`docker compose restart gateway`) does not reset an active limit. Redis runs with append-only persistence, so counters also survive a Redis restart until they expire.
+
 ## Checking the infrastructure
 
 ```sh
@@ -104,7 +126,7 @@ curl -i http://localhost:8000/api/users/slow/ # 504 after about 5 s
 The gateway has two kinds of tests:
 
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), and timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s). These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
-- `core/tests.py` needs no Docker. `UpstreamConnectionErrorTests` mocks the upstream client to test connection errors (502), which a running service cannot produce. The rate-limit tests patch the clock, so window expiration is tested without waiting 60 seconds.
+- `core/tests.py` does not need the user and order services. `UpstreamConnectionErrorTests` mocks the upstream client to test connection errors (502), which a running service cannot produce. The rate-limiter tests use the real Redis at `REDIS_URL` and patch the clock, so window expiration is tested without waiting 60 seconds. Each test uses limiter names with a random `test-` prefix and deletes only its own keys, so tests do not affect the live gateway's counters.
 
 The easiest way is to run them inside the gateway container:
 
@@ -113,7 +135,7 @@ docker compose up --build -d
 docker compose exec gateway python manage.py test core
 ```
 
-To run them on the host, you need Python 3.13 and the packages in `requirements.txt`. The e2e tests call `http://localhost:8000` by default; set `GATEWAY_URL` to change it.
+To run them on the host, you need Python 3.13, the packages in `requirements.txt`, and a Redis server reachable at `REDIS_URL` (default `redis://localhost:6379/0`; the Compose Redis does not publish a port to the host). The e2e tests call `http://localhost:8000` by default; set `GATEWAY_URL` to change it.
 
 ```sh
 python -m venv .venv && source .venv/bin/activate
@@ -122,7 +144,7 @@ cd gateway && cp .env.example .env
 python manage.py test core
 ```
 
-The full run takes about 5 seconds because of the timeout test.
+The full run takes about 5 seconds because of the timeout test. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
 
 ## Intentionally unsupported
 

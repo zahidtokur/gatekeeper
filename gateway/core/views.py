@@ -9,8 +9,8 @@ from core.http import get_client
 from core.rate_limiter import FixedWindowRateLimiter
 
 
-get_request_limiter = FixedWindowRateLimiter(limit=30, window_size=60)
-post_request_limiter = FixedWindowRateLimiter(limit=10, window_size=60)
+get_request_limiter = FixedWindowRateLimiter(name="get", limit=30, window_size=60)
+post_request_limiter = FixedWindowRateLimiter(name="post", limit=10, window_size=60)
 
 
 class GatewayProxy(APIView):
@@ -34,7 +34,7 @@ class GatewayProxy(APIView):
             )
 
         rate_limiter = self.rate_limiters.get(request.method)
-        is_limited, retry_after = rate_limiter.check(ip_address)
+        is_limited, retry_after = await rate_limiter.check(ip_address)
         if is_limited:
             return Response(
                 {"detail": "Rate limit exceeded. Retry after the time in the Retry-After header."},
