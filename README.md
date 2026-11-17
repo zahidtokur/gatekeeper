@@ -16,6 +16,25 @@ client ──> gateway (:8000) ──/api/users/...──> user_service (:8001) 
 - The upstream status code, body, and `Content-Type` are returned unchanged.
 - An unknown service returns `404`. An upstream connection error returns `502`, and an upstream timeout returns `504` (2 s to connect, 5 s for each read/write).
 
+## Client identification and rate-limit policy
+
+The following decisions define the planned rate limiter:
+
+For local development, the gateway will use the client's resolved IP address as its identifier. Requests with different source IP addresses belong to different clients. Requests sharing an IP address, including clients behind the same NAT, share the same allowance. To test two independent clients, use two distinct source IP addresses; separate processes on the same IP do not count as separate clients.
+
+This identifier is **not authentication** and provides no proof of identity. IP-based identification can be spoofed, particularly if untrusted forwarding headers are accepted. Do not treat an arbitrary client-supplied IP header as a verified identity.
+
+The default policy uses a fixed 60-second window and separate counters for each client and HTTP method:
+
+| Method | Requests allowed per client per 60-second window |
+| --- | --- |
+| GET | 60 |
+| POST | 20 |
+
+These limits cover all proxied routes under `/api/users/` and `/api/orders/`, including nested paths. Each client's GET allowance is shared across both services, and its POST allowance is also shared across both services. Switching services or paths does not provide a fresh allowance. GET requests do not consume the POST allowance, and vice versa. Health checks at `/health/` and non-proxy routes are outside this policy; methods other than GET and POST remain unsupported.
+
+If the gateway cannot determine a client's IP address, it will reject the request with **503 Service Unavailable** rather than forward it or assign a shared anonymous identifier.
+
 ## Running the project
 
 Docker Desktop must be running with Linux containers enabled. Docker Compose v2 is required. From the project root:
@@ -89,7 +108,8 @@ The full run takes about 5 seconds because of the timeout test.
 
 - HTTP methods other than GET and POST
 - Forwarding client headers other than `Content-Type`, or upstream response headers other than `Content-Type`
-- Authentication, rate limiting, caching, retries, load balancing, and dynamic service discovery
+- Authentication, caching, retries, load balancing, and dynamic service discovery
+- Rate-limit enforcement (the planned policy is documented above)
 - Streaming request and response bodies, WebSockets, and advanced HTTP edge cases
 - Connection pool tuning beyond the defaults in `gateway/core/http.py`
 
