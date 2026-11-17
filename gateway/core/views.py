@@ -6,25 +6,48 @@ from django.http import Http404, HttpResponse
 from rest_framework.response import Response
 
 from core.http import get_client
+from core.rate_limiter import FixedWindowRateLimiter
+
+
+get_request_limiter = FixedWindowRateLimiter(limit=30, window_size=60)
+post_request_limiter = FixedWindowRateLimiter(limit=10, window_size=60)
 
 
 class GatewayProxy(APIView):
+    http_method_names = ['get', 'post']
     services = {
         "users": settings.USER_SERVICE_URL + "/v1/users/",
         "orders": settings.ORDER_SERVICE_URL + "/v1/orders/",
     }
-
-    async def _forward(self, request, service_name, path):
-        service_url = self.get_service_url(service_name, path)
+    rate_limiters = {
+        "GET": get_request_limiter,
+        "POST": post_request_limiter
+    }
+    
+    async def _process(self, request, service_name, path):
+        ip_address = request.META.get("REMOTE_ADDR")
+        
+        if not ip_address:
+            return Response(status=503)
+        
+        rate_limiter = self.rate_limiters.get(request.method)
+        is_limited, retry_after = rate_limiter.check(ip_address)
+        if is_limited:
+            return Response(status=429, headers={"Retry-After": retry_after})
+        
+        upstream_url = self.build_upstream_url(service_name, path)
         headers = {}
         if ct := request.headers.get("content-type"):
             headers["content-type"] = ct
+            
+        return await self._forward(request, upstream_url, headers)
 
+    async def _forward(self, request, url, headers):
         client = get_client()
         try:
             upstream_response = await client.request(
                 request.method,
-                service_url,
+                url,
                 content=request.body or None,
                 headers=headers,
                 params=dict(request.query_params.lists())
@@ -50,20 +73,20 @@ class GatewayProxy(APIView):
         )
 
 
-    def get_service_url(self, service_name, path):
-        service_url = self.services.get(service_name)
-        if not service_url:
+    def build_upstream_url(self, service_name, path):
+        upstream_url = self.services.get(service_name)
+        if not upstream_url:
             raise Http404(
                 f"No service named {service_name} found for path {path}"
             )
 
         if path and not path.endswith("/"):
             path += "/"
-        service_url += path
-        return service_url
+        upstream_url += path
+        return upstream_url
 
     async def get(self, request, service_name, path=''):
-        return await self._forward(request, service_name, path)
+        return await self._process(request, service_name, path)
 
     async def post(self, request, service_name, path=''):
-        return await self._forward(request, service_name, path)
+        return await self._process(request, service_name, path)
