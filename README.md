@@ -79,7 +79,7 @@ On startup, each Django service runs migrations against its own database, then s
 
 The gateway reads the Redis address from `REDIS_URL` (`redis://redis:6379/0` in Docker Compose). Redis starts with the rest of the stack (`docker compose up -d`), and the gateway waits for it to be healthy. Redis is reachable only inside the Docker network; use `docker compose exec redis redis-cli` to inspect it.
 
-Each counter is one key, `ratelimit:<limiter>:<client IP>:<window start>`, for example `ratelimit:post:172.21.0.1:1794926520`. The key expires when its 60-second window ends, so old keys are removed without manual cleanup. Because the window start is part of the key, a new window automatically uses a new counter.
+Each counter is one key, `ratelimit:<limiter>:<client IP>:<window start>`, for example `ratelimit:post:172.21.0.1:1794926520`. For a newly created counter, the gateway separately assigns a 60-second TTL after incrementing it. Expiration is measured from that operation, not from the fixed window boundary, so an old key may remain after its counting window ends. Because the window start is part of the key, a new window automatically uses a new counter. Expiry assignment can fail independently of the increment; see the atomicity limitations below.
 
 ```sh
 docker compose exec redis redis-cli --scan --pattern 'ratelimit:*'   # list counters
@@ -96,6 +96,39 @@ docker compose exec redis redis-cli FLUSHDB
 ```
 
 Restarting the gateway (`docker compose restart gateway`) does not reset an active limit. Redis runs with append-only persistence, so counters also survive a Redis restart until they expire.
+
+## Rate-limit observations with two gateway instances
+
+A manual integration check was performed with two independent gateway containers exposed on host ports 8000 and 8003. Both ran on the same Docker network and used the same Redis database. Matching Redis server identities and connection settings confirmed that the gateways shared the same backing store.
+
+Requests from one client IP were distributed between the two instances. GET requests alternated between user and order routes to check whether switching gateways or upstream services provided a separate allowance. POST requests were then sent through both instances to observe whether their allowance remained independent of the exhausted GET limit.
+
+The check also inspected Redis counters and expiry values, verified that requests were accepted again after the next fixed-window boundary, and sent a concurrent batch through both gateways to observe the combined number of accepted requests. Each batch stayed within its counting window, and fresh windows were used without deleting existing Redis data. The check used real HTTP requests and Redis operations, without mocks.
+
+### Observed results
+
+The check was run locally on November 18, 2026, against ports 8000 and 8003. Both gateways reported `redis://redis:6379/0` and the same Redis run ID. The observed peer IP was `172.18.0.1` (this address may differ on another machine).
+
+| Check | Observed result |
+| --- | --- |
+| 32 GET requests alternating between instances and user/order routes | First 30 returned 200; requests 31 and 32 returned 429, one on each instance |
+| 12 POST requests alternating between instances, after exhausting GET | First 10 returned 200; requests 11 and 12 returned 429 |
+| Redis counters after these batches | One GET key with value 32 and one POST key with value 12 for the same IP and window; both had a TTL of 59 seconds when inspected |
+| Rate-limit response headers | Rejected requests contained `Retry-After`; observed values were 60 and 59 seconds |
+| First GET through each instance in the next window | Both returned 200 |
+| 40 concurrent GETs across both instances after those two accepted GETs | 28 returned 200 and 12 returned 429, giving 30 accepted GETs in total for that window |
+
+The allowance was shared across gateway processes and upstream services, while GET and POST used independent counters. Rejected attempts also increased the Redis counter: its value represents attempts, not just requests forwarded upstream. A fresh window restored the allowance without restarting either gateway. The concurrent batch did not exceed the configured limit in this run; it does not prove that all failure scenarios are safe.
+
+### Current atomicity limitations
+
+Redis increments each counter atomically, so simultaneous requests to the same key receive distinct counts. However, incrementing the counter and assigning its expiry are two separate operations in the current implementation.
+
+If the gateway stops, its request is cancelled, or the connection fails after the first increment but before expiry is assigned, the counter can remain without a TTL. Later requests increase its value beyond one and therefore do not assign the missing expiry. Such keys can accumulate indefinitely and consume Redis memory. Because the key includes the window start, a later window uses a different key: the abandoned counter does not permanently block the client.
+
+A delay between the first increment and expiry assignment also delays cleanup relative to the original request. In addition, a Redis command can succeed before a connection failure prevents the gateway from receiving its result. A request may then consume allowance even though the gateway returns an error and never forwards it; retrying that HTTP request can consume another count. Redis errors from the limiter currently propagate without a dedicated response handler.
+
+The manual check above did not interrupt gateways or inject Redis failures. These are failure scenarios identified from the current operation sequence, not failures reproduced by that check.
 
 ## Checking the infrastructure
 
