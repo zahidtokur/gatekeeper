@@ -1,6 +1,8 @@
 import asyncio
+import os
+import time
 import uuid
-from unittest import IsolatedAsyncioTestCase
+from unittest import IsolatedAsyncioTestCase, SkipTest, TestCase
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import httpx
@@ -295,3 +297,74 @@ class GatewayRateLimitIntegrationTests(RedisTestCase):
         self.clock.return_value = 180
 
         self.assertEqual((await self.request()).status_code, 200)
+
+
+class MultiGatewaySharedQuotaTests(TestCase):
+    """Opt-in HTTP check against two already-running gateways sharing Redis."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        second_url = os.environ.get("GATEWAY_SECOND_URL")
+        if not second_url:
+            raise SkipTest("Set GATEWAY_SECOND_URL to an already-running second gateway")
+        cls.urls = [
+            os.environ.get("GATEWAY_URL", "http://localhost:8000").rstrip("/"),
+            second_url.rstrip("/"),
+        ]
+        if cls.urls[0] == cls.urls[1]:
+            raise ValueError("The two gateway URLs must be different")
+        cls.client = httpx.Client(timeout=10, trust_env=False)
+        cls.addClassCleanup(cls.client.close)
+        for url in cls.urls:
+            try:
+                cls.client.get(url + "/health/").raise_for_status()
+            except httpx.HTTPError as exc:
+                raise SkipTest(f"Gateway is not ready at {url}: {exc}")
+
+    @staticmethod
+    def wait_for_fresh_window(window_size):
+        time.sleep(window_size - time.time() % window_size + 0.1)
+
+    def test_sequential_get_and_post_quotas_are_shared_across_instances(self):
+        get_limiter = GatewayProxy.rate_limiters["GET"]
+        post_limiter = GatewayProxy.rate_limiters["POST"]
+        self.assertEqual(get_limiter.window_size, post_limiter.window_size)
+        window_size = get_limiter.window_size
+        self.wait_for_fresh_window(window_size)
+        window_start = int(time.time()) // window_size * window_size
+        try:
+            for method, limiter in (("GET", get_limiter), ("POST", post_limiter)):
+                with self.subTest(method=method):
+                    # Alternate instances; GET also alternates upstream services.
+                    for index in range(limiter.limit):
+                        url = self.urls[index % 2]
+                        path = "/api/users/1/" if index % 2 == 0 else "/api/orders/42/"
+                        kwargs = {}
+                        if method == "POST":
+                            path = "/api/orders/"
+                            kwargs = {"json": {"user_id": 1}}
+                        response = self.client.request(method, url + path, **kwargs)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(response.json()["method"], method)
+
+                    # Each instance handled only part of the allowance, yet both
+                    # must reject once the combined quota has been consumed.
+                    for url in self.urls:
+                        path = "/api/users/1/" if method == "GET" else "/api/orders/"
+                        response = self.client.request(method, url + path)
+                        self.assertEqual(response.status_code, 429, response.text)
+                        retry_after = int(response.headers["Retry-After"])
+                        self.assertGreaterEqual(retry_after, 1)
+                        self.assertLessEqual(retry_after, window_size)
+                        self.assertIn("Rate limit exceeded", response.json()["detail"])
+
+            self.assertEqual(
+                int(time.time()) // window_size * window_size, window_start,
+                "The request batch crossed a window boundary; rerun without competing traffic",
+            )
+        finally:
+            # Leave the live client's allowance available to subsequent E2E tests.
+            # No Redis keys are deleted and no gateway/container is managed here.
+            if int(time.time()) // window_size * window_size == window_start:
+                self.wait_for_fresh_window(window_size)

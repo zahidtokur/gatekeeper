@@ -159,7 +159,27 @@ curl -i http://localhost:8000/api/users/slow/ # 504 after about 5 s
 The gateway has two kinds of tests:
 
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), and timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s). These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
-- `core/tests.py` does not need the user and order services. `UpstreamConnectionErrorTests` mocks the upstream client to test connection errors (502), which a running service cannot produce. The rate-limiter tests use the real Redis at `REDIS_URL` and patch the clock, so window expiration is tested without waiting 60 seconds. Each test uses limiter names with a random `test-` prefix and deletes only its own keys, so tests do not affect the live gateway's counters.
+- In `core/tests.py`, `UpstreamConnectionErrorTests` mocks upstream connection errors (502). The rate-limiter tests use the real Redis at `REDIS_URL` and control the clock, so window changes can be tested without waiting 60 seconds. Redis-backed tests use random `test-` limiter names and delete only their own keys.
+- `MultiGatewaySharedQuotaTests` in `core/tests.py` sends sequential HTTP requests to two **already-running** gateway instances. It does not start or stop processes or containers, patch clocks, change limits, or delete Redis data. It verifies shared GET and POST quotas and confirms that POST remains available after GET is exhausted. Set `GATEWAY_SECOND_URL` to enable it; otherwise it is skipped. If either gateway's health endpoint is unreachable or returns an error, the class is also skipped.
+
+### Containers expected by the multi-gateway test
+
+The test expects two distinct gateway processes running the same code and rate-limit settings, both connected to the same Redis server and database. The user and order services must also be running. Both gateways must see the test runner as the same client IP. The current configuration allows 30 GET and 10 POST requests per 60-second window.
+
+For a test run from the host, expose the gateways at ports 8000 and 8003 and set `GATEWAY_URL=http://localhost:8000` and `GATEWAY_SECOND_URL=http://localhost:8003`. The second container is managed externally; the test never creates it. Different URLs must actually point to different gateway instances.
+
+For example, with the usual Compose stack running, the following starts the additional container and runs just the shared-quota test from the main gateway container:
+
+```sh
+docker compose up -d --build --wait
+docker compose run -d --no-deps --name gateway-quota-check -p 127.0.0.1:8003:8000 -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,gateway-quota-check gateway
+docker compose exec -e GATEWAY_URL=http://gateway:8000 -e GATEWAY_SECOND_URL=http://gateway-quota-check:8000 gateway python manage.py test core.tests.MultiGatewaySharedQuotaTests
+```
+
+Container-based runs use Docker network names instead of the host's published ports. The extra allowed host lets the second gateway accept requests addressed to its container name. The example expects the name and port to be available. Stop and remove the additional container separately when finished.
+
+The test waits for a new fixed window, then distributes requests between both instances. After exhausting each method's combined quota, it checks that both instances return 429 with a valid `Retry-After`. It waits for the next window before finishing so subsequent tests can use the client's allowance. With 60-second windows, this test takes roughly one to two minutes. It requires synchronized clocks, identical gateway limits, and no other traffic from the same client IP during the run; requests must complete within one window. Unlike the isolated Redis tests, it deliberately consumes the live client's quota.
+
 
 The easiest way is to run them inside the gateway container:
 
@@ -177,7 +197,7 @@ cd gateway && cp .env.example .env
 python manage.py test core
 ```
 
-The full run takes about 5 seconds because of the timeout test. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
+The ordinary run includes a 5-second upstream timeout test. Enabling the multi-gateway test adds roughly one to two minutes for window alignment and quota recovery. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
 
 ## Intentionally unsupported
 
