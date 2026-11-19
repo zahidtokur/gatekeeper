@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 from django.test import SimpleTestCase, override_settings
 
 
@@ -44,3 +46,54 @@ class OrderViewsetTests(SimpleTestCase):
                 self.assertEqual(response.status_code, 405)
                 self.assertIn("detail", response.json())
                 self.assertNotIn(method.upper(), response.headers["Allow"])
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"])
+class SlowResponseTests(SimpleTestCase):
+    url = "/v1/orders/slow/"
+
+    async def test_waits_for_requested_seconds(self):
+        with patch("orders.views.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            response = await self.async_client.get(self.url, {"seconds": "2.5"})
+
+        sleep.assert_awaited_once_with(2.5)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            "service": "order-service",
+            "slow": True,
+            "delayed_seconds": 2.5,
+        })
+
+    async def test_invalid_seconds_returns_400(self):
+        for seconds in ("abc", "-1", "31"):
+            with self.subTest(seconds=seconds):
+                with patch("orders.views.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                    response = await self.async_client.get(self.url, {"seconds": seconds})
+
+                sleep.assert_not_awaited()
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("detail", response.json())
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"])
+class ErrorResponseTests(SimpleTestCase):
+    url = "/v1/orders/error/"
+
+    async def test_returns_requested_error_status(self):
+        for code in (500, 503):
+            with self.subTest(code=code):
+                response = await self.async_client.get(self.url, {"error_code": code})
+
+                self.assertEqual(response.status_code, code)
+                self.assertEqual(response.json(), {
+                    "service": "order-service",
+                    "error": True,
+                })
+
+    async def test_invalid_error_code_returns_400(self):
+        for params in ({}, {"error_code": "404"}, {"error_code": "abc"}):
+            with self.subTest(params=params):
+                response = await self.async_client.get(self.url, params)
+
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("detail", response.json())

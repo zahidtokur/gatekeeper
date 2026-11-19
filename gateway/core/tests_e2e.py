@@ -70,3 +70,20 @@ class GatewayE2ETests(TestCase):
 
         self.assertEqual(response.status_code, 504)
         self.assertEqual(response.json(), {"detail": "Upstream timeout"})
+
+    def test_configurable_slow_upstream_returns_504(self):
+        response = self.client.get("/api/orders/slow/?seconds=6")
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json(), {"detail": "Upstream timeout"})
+
+    def test_upstream_5xx_is_forwarded(self):
+        for code in (500, 503):
+            with self.subTest(code=code):
+                response = self.client.get(f"/api/orders/error/?error_code={code}")
+
+                self.assertEqual(response.status_code, code)
+                self.assertEqual(response.json(), {
+                    "service": "order-service",
+                    "error": True,
+                })

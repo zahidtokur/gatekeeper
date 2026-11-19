@@ -154,11 +154,30 @@ curl -i http://localhost:8000/api/unknown/   # 404
 curl -i http://localhost:8000/api/users/slow/ # 504 after about 5 s
 ```
 
+### Upstream delay and error scenarios
+
+order_service provides endpoints for producing predictable upstream delays and errors without changing gateway code:
+
+- `GET /v1/orders/slow/?seconds=<n>` waits `n` seconds (0 to 30, decimals allowed; default 0) and then returns 200.
+- `GET /v1/orders/error/?error_code=<code>` returns the given status. Only `500` and `503` are accepted.
+
+Invalid parameters return 400. Example requests through the gateway:
+
+```sh
+curl -i "http://localhost:8000/api/orders/1/"                     # 200, healthy upstream
+curl -i "http://localhost:8000/api/orders/slow/?seconds=2"        # 200 after about 2 s
+curl -i "http://localhost:8000/api/orders/slow/?seconds=6"        # 504 after about 5 s (longer than the gateway read timeout)
+curl -i "http://localhost:8000/api/orders/error/?error_code=500"  # 500 from order_service
+curl -i "http://localhost:8000/api/orders/error/?error_code=503"  # 503 from order_service
+```
+
+Upstream 5xx responses are forwarded unchanged, so they can be told apart from gateway-generated errors by their body (`{"service": "order-service", "error": true}` instead of `{"detail": "..."}`). To produce a gateway-generated `502`, stop the upstream: `docker compose stop order_service`.
+
 ## Running the tests
 
 The gateway has two kinds of tests:
 
-- `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), and timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s). These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
+- `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s, and the order_service `/v1/orders/slow/?seconds=6` endpoint), and forwarding of upstream 500 and 503 responses. These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
 - In `core/tests.py`, `UpstreamConnectionErrorTests` mocks upstream connection errors (502). The rate-limiter tests use the real Redis at `REDIS_URL` and control the clock, so window changes can be tested without waiting 60 seconds. Redis-backed tests use random `test-` limiter names and delete only their own keys.
 - `MultiGatewaySharedQuotaTests` in `core/tests.py` sends sequential HTTP requests to two **already-running** gateway instances. It does not start or stop processes or containers, patch clocks, change limits, or delete Redis data. It verifies shared GET and POST quotas and confirms that POST remains available after GET is exhausted. Set `GATEWAY_SECOND_URL` to enable it; otherwise it is skipped. If either gateway's health endpoint is unreachable or returns an error, the class is also skipped.
 
@@ -188,6 +207,12 @@ docker compose up --build -d
 docker compose exec gateway python manage.py test core
 ```
 
+The order_service delay and error endpoints have their own unit tests:
+
+```sh
+docker compose exec order_service python manage.py test orders
+```
+
 To run them on the host, you need Python 3.13, the packages in `requirements.txt`, and a Redis server reachable at `REDIS_URL` (default `redis://localhost:6379/0`; the Compose Redis does not publish a port to the host). The e2e tests call `http://localhost:8000` by default; set `GATEWAY_URL` to change it.
 
 ```sh
@@ -197,7 +222,7 @@ cd gateway && cp .env.example .env
 python manage.py test core
 ```
 
-The ordinary run includes a 5-second upstream timeout test. Enabling the multi-gateway test adds roughly one to two minutes for window alignment and quota recovery. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
+The ordinary run includes two 5-second upstream timeout tests. Enabling the multi-gateway test adds roughly one to two minutes for window alignment and quota recovery. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
 
 ## Intentionally unsupported
 
