@@ -18,7 +18,7 @@ from core.views import GatewayProxy
 
 @override_settings(ALLOWED_HOSTS=["testserver"])
 class UpstreamConnectionErrorTests(SimpleTestCase):
-    """A connection error can't be produced by a running service, so it is mocked."""
+    """Connection errors and timeouts are mocked, so these tests run without waiting."""
 
     def setUp(self):
         self.upstream = Mock(spec=httpx.AsyncClient)
@@ -41,6 +41,30 @@ class UpstreamConnectionErrorTests(SimpleTestCase):
 
                 self.assertEqual(response.status_code, 502)
                 self.assertEqual(response.json(), {"detail": "Upstream connection error"})
+
+    async def test_connect_timeout_returns_502(self):
+        self.upstream.request.side_effect = httpx.ConnectTimeout("connect timed out")
+
+        response = await self.async_client.get("/api/orders/1/")
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json(), {"detail": "Connection timed out."})
+
+    async def test_read_timeout_returns_504(self):
+        self.upstream.request.side_effect = httpx.ReadTimeout("read timed out")
+
+        response = await self.async_client.get("/api/orders/1/")
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json(), {"detail": "Upstream timeout"})
+
+    async def test_healthy_upstream_response_is_forwarded(self):
+        self.upstream.request.return_value = httpx.Response(200, json={"id": 1})
+
+        response = await self.async_client.get("/api/orders/1/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"id": 1})
 
 
 class RedisTestCase(IsolatedAsyncioTestCase):

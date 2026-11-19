@@ -134,3 +134,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 USER_SERVICE_URL = os.environ.get("USER_SERVICE_URL", "http://localhost:8001")
 ORDER_SERVICE_URL = os.environ.get("ORDER_SERVICE_URL", "http://localhost:8002")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
+UPSTREAM_CONNECT_TIMEOUT = float(os.environ.get("UPSTREAM_CONNECT_TIMEOUT", "2.0"))
+UPSTREAM_READ_TIMEOUT = float(os.environ.get("UPSTREAM_READ_TIMEOUT", "5.0"))

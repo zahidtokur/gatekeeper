@@ -14,7 +14,21 @@ client ──> gateway (:8000) ──/api/users/...──> user_service (:8001) 
 - The gateway matches `/api/<service>/<path>` against a static route table (`gateway/core/views.py`) and forwards the request with a shared async HTTPX client.
 - The path gets a trailing slash. Query parameters, the request body, and `Content-Type` are forwarded. No other client headers are forwarded.
 - The upstream status code, body, and `Content-Type` are returned unchanged.
-- An unknown service returns `404`. An upstream connection error returns `502`, and an upstream timeout returns `504` (2 s to connect, 5 s for each read/write).
+- An unknown service returns `404`. If no connection to the upstream can be established (refused, DNS failure, or connect timeout), the gateway returns `502`. If the connection is established but the response is too slow, it returns `504`.
+
+### Upstream timeouts
+
+Timeouts are read from environment variables (`gateway/config/settings.py`), so they can be changed without editing request-handling code:
+
+| Variable | Default | Applies to |
+| --- | --- | --- |
+| `UPSTREAM_CONNECT_TIMEOUT` | `2.0` s | Establishing the TCP connection, and waiting for a free pooled connection |
+| `UPSTREAM_READ_TIMEOUT` | `5.0` s | Each read and write once connected |
+
+### Upstream HTTP errors vs. network failures
+
+- **Upstream HTTP error response:** the upstream was reached and answered with an error status, such as `500` or `503`. The gateway forwards the status and body unchanged, for example `{"service": "order-service", "error": true}`.
+- **Network-level failure:** the gateway got no usable response. It returns its own error with a `{"detail": "..."}` body: `502` when the connection could not be established or broke (`{"detail": "Connection timed out."}` for a connect timeout, `{"detail": "Upstream connection error"}` otherwise), and `504` with `{"detail": "Upstream timeout"}` when a connected upstream did not respond within `UPSTREAM_READ_TIMEOUT`.
 
 ## Client identification and rate-limit policy
 
@@ -178,7 +192,7 @@ Upstream 5xx responses are forwarded unchanged, so they can be told apart from g
 The gateway has two kinds of tests:
 
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s, and the order_service `/v1/orders/slow/?seconds=6` endpoint), and forwarding of upstream 500 and 503 responses. These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
-- In `core/tests.py`, `UpstreamConnectionErrorTests` mocks upstream connection errors (502). The rate-limiter tests use the real Redis at `REDIS_URL` and control the clock, so window changes can be tested without waiting 60 seconds. Redis-backed tests use random `test-` limiter names and delete only their own keys.
+- In `core/tests.py`, `UpstreamConnectionErrorTests` mocks the upstream client: connection errors and connect timeouts (502), read timeouts (504), and a healthy response (200). These run instantly, without real waits. The rate-limiter tests use the real Redis at `REDIS_URL` and control the clock, so window changes can be tested without waiting 60 seconds. Redis-backed tests use random `test-` limiter names and delete only their own keys.
 - `MultiGatewaySharedQuotaTests` in `core/tests.py` sends sequential HTTP requests to two **already-running** gateway instances. It does not start or stop processes or containers, patch clocks, change limits, or delete Redis data. It verifies shared GET and POST quotas and confirms that POST remains available after GET is exhausted. Set `GATEWAY_SECOND_URL` to enable it; otherwise it is skipped. If either gateway's health endpoint is unreachable or returns an error, the class is also skipped.
 
 ### Containers expected by the multi-gateway test

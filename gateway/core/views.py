@@ -59,6 +59,11 @@ class GatewayProxy(APIView):
                 headers=headers,
                 params=dict(request.query_params.lists())
             )
+        except httpx.ConnectTimeout:
+            return Response(
+                {"detail": "Connection timed out."},
+                status=502,
+            )
         except httpx.TimeoutException:
             return Response(
                 {"detail": "Upstream timeout"},
