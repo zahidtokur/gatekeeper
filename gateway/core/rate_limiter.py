@@ -1,6 +1,6 @@
 import time
 
-from core.http import get_redis
+from core.clients import get_redis
 
 
 class FixedWindowRateLimiter:

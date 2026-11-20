@@ -192,51 +192,7 @@ Upstream 5xx responses are forwarded unchanged, so they can be told apart from g
 The gateway has two kinds of tests:
 
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s, and the order_service `/v1/orders/slow/?seconds=6` endpoint), and forwarding of upstream 500 and 503 responses. These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
-- In `core/tests.py`, `UpstreamConnectionErrorTests` mocks the upstream client: connection errors and connect timeouts (502), read timeouts (504), and a healthy response (200). These run instantly, without real waits. The rate-limiter tests use the real Redis at `REDIS_URL` and control the clock, so window changes can be tested without waiting 60 seconds. Redis-backed tests use random `test-` limiter names and delete only their own keys.
-- `MultiGatewaySharedQuotaTests` in `core/tests.py` sends sequential HTTP requests to two **already-running** gateway instances. It does not start or stop processes or containers, patch clocks, change limits, or delete Redis data. It verifies shared GET and POST quotas and confirms that POST remains available after GET is exhausted. Set `GATEWAY_SECOND_URL` to enable it; otherwise it is skipped. If either gateway's health endpoint is unreachable or returns an error, the class is also skipped.
-
-### Containers expected by the multi-gateway test
-
-The test expects two distinct gateway processes running the same code and rate-limit settings, both connected to the same Redis server and database. The user and order services must also be running. Both gateways must see the test runner as the same client IP. The current configuration allows 30 GET and 10 POST requests per 60-second window.
-
-For a test run from the host, expose the gateways at ports 8000 and 8003 and set `GATEWAY_URL=http://localhost:8000` and `GATEWAY_SECOND_URL=http://localhost:8003`. The second container is managed externally; the test never creates it. Different URLs must actually point to different gateway instances.
-
-For example, with the usual Compose stack running, the following starts the additional container and runs just the shared-quota test from the main gateway container:
-
-```sh
-docker compose up -d --build --wait
-docker compose run -d --no-deps --name gateway-quota-check -p 127.0.0.1:8003:8000 -e DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1,gateway-quota-check gateway
-docker compose exec -e GATEWAY_URL=http://gateway:8000 -e GATEWAY_SECOND_URL=http://gateway-quota-check:8000 gateway python manage.py test core.tests.MultiGatewaySharedQuotaTests
-```
-
-Container-based runs use Docker network names instead of the host's published ports. The extra allowed host lets the second gateway accept requests addressed to its container name. The example expects the name and port to be available. Stop and remove the additional container separately when finished.
-
-The test waits for a new fixed window, then distributes requests between both instances. After exhausting each method's combined quota, it checks that both instances return 429 with a valid `Retry-After`. It waits for the next window before finishing so subsequent tests can use the client's allowance. With 60-second windows, this test takes roughly one to two minutes. It requires synchronized clocks, identical gateway limits, and no other traffic from the same client IP during the run; requests must complete within one window. Unlike the isolated Redis tests, it deliberately consumes the live client's quota.
-
-
-The easiest way is to run them inside the gateway container:
-
-```sh
-docker compose up --build -d
-docker compose exec gateway python manage.py test core
-```
-
-The order_service delay and error endpoints have their own unit tests:
-
-```sh
-docker compose exec order_service python manage.py test orders
-```
-
-To run them on the host, you need Python 3.13, the packages in `requirements.txt`, and a Redis server reachable at `REDIS_URL` (default `redis://localhost:6379/0`; the Compose Redis does not publish a port to the host). The e2e tests call `http://localhost:8000` by default; set `GATEWAY_URL` to change it.
-
-```sh
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cd gateway && cp .env.example .env
-python manage.py test core
-```
-
-The ordinary run includes two 5-second upstream timeout tests. Enabling the multi-gateway test adds roughly one to two minutes for window alignment and quota recovery. The e2e tests count toward the live rate limits; if you run them many times within a minute and get 429 responses, reset the limits as described above.
+- In `core/tests.py`, `UpstreamConnectionErrorTests` mocks the upstream client: connection errors and connect timeouts (502), read timeouts (504), and a healthy response (200). These run instantly, without real waits. `FixedWindowRateLimiterConfigTests` checks invalid limiter settings. `GatewayRateLimitTests` mocks the limiters and forwarding to check method selection, client identification, shared limiter usage across services, and rejection responses without contacting Redis or upstream services.
 
 ## Intentionally unsupported
 
