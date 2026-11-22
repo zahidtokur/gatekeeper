@@ -40,10 +40,12 @@ This identifier is **not authentication** and provides no proof of identity. IP-
 
 The default policy uses a fixed 60-second window and separate counters for each client and HTTP method:
 
-| Method | Requests allowed per client per 60-second window |
-| --- | --- |
-| GET | 30 |
-| POST | 10 |
+| Method | Requests allowed per client per 60-second window | Variable |
+| --- | --- | --- |
+| GET | 30 | `RATE_LIMIT_GET` |
+| POST | 10 | `RATE_LIMIT_POST` |
+
+The limits can be overridden with the environment variables above, for example a high quota for load tests.
 
 These limits cover all proxied routes under `/api/users/` and `/api/orders/`, including nested paths. Each client's GET allowance is shared across both services, and its POST allowance is also shared across both services. Switching services or paths does not provide a fresh allowance. GET requests do not consume the POST allowance, and vice versa. Health checks at `/health/` and non-proxy routes are outside this policy; methods other than GET and POST remain unsupported.
 

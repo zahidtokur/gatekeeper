@@ -10,8 +10,8 @@ from core.circuit_breaker import CircuitBreaker
 from core.clients import get_http_client
 from core.rate_limiter import FixedWindowRateLimiter
 
-get_request_limiter = FixedWindowRateLimiter(name="get", limit=30, window_size=60)
-post_request_limiter = FixedWindowRateLimiter(name="post", limit=10, window_size=60)
+get_request_limiter = FixedWindowRateLimiter(name="get", limit=settings.RATE_LIMIT_GET, window_size=60)
+post_request_limiter = FixedWindowRateLimiter(name="post", limit=settings.RATE_LIMIT_POST, window_size=60)
 user_service_cb = CircuitBreaker()
 order_service_cb = CircuitBreaker()
 

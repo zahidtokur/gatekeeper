@@ -137,3 +137,6 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 UPSTREAM_CONNECT_TIMEOUT = float(os.environ.get("UPSTREAM_CONNECT_TIMEOUT", "2.0"))
 UPSTREAM_READ_TIMEOUT = float(os.environ.get("UPSTREAM_READ_TIMEOUT", "5.0"))
+
+RATE_LIMIT_GET = int(os.environ.get("RATE_LIMIT_GET", "30"))
+RATE_LIMIT_POST = int(os.environ.get("RATE_LIMIT_POST", "10"))
