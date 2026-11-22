@@ -3,3 +3,4 @@ services:
   gateway:
     environment:
       RATE_LIMIT_GET: "1000000"
+      CIRCUIT_BREAKER_ENABLED: "${CIRCUIT_BREAKER_ENABLED:-1}"
