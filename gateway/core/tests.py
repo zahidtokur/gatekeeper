@@ -347,6 +347,25 @@ class GatewayCircuitBreakerTests(SimpleTestCase):
         self.upstream.request.assert_awaited_once()
         self.assertEqual(self.orders_breaker.state, CircuitState.CLOSED)
 
+    async def test_open_circuit_response_is_gateway_json(self):
+        self.users_breaker.record_failure()
+        self.users_breaker.record_failure()
+
+        response = await self.request()
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {"detail": "Service temporarily unavailable."})
+
+    @override_settings(CIRCUIT_BREAKER_ENABLED=False)
+    async def test_disabled_breaker_forwards_every_request(self):
+        self.upstream.request.return_value = httpx.Response(500)
+
+        for _ in range(5):
+            response = await self.request()
+            self.assertEqual(response.status_code, 500)
+
+        self.assertEqual(self.upstream.request.await_count, 5)
+
     async def test_httpx_errors_record_failure_without_recording_success(self):
         cases = (
             (httpx.ConnectTimeout, 502),

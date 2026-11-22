@@ -196,6 +196,12 @@ The gateway has two kinds of tests:
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s, and the order_service `/v1/orders/slow/?seconds=6` endpoint), and forwarding of upstream 500 and 503 responses. These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
 - In `core/tests.py`, `UpstreamConnectionErrorTests` mocks the upstream client: connection errors and connect timeouts (502), read timeouts (504), and a healthy response (200). These run instantly, without real waits. `FixedWindowRateLimiterConfigTests` checks invalid limiter settings. `GatewayRateLimitTests` mocks the limiters and forwarding to check method selection, client identification, shared limiter usage across services, and rejection responses without contacting Redis or upstream services.
 
+### Circuit breaker
+
+Each upstream service has its own in-memory circuit breaker. After 5 consecutive failures (a `5xx` response, a timeout or a connection error) the circuit opens for 30 seconds. While it is open, the gateway answers `503` with `{"detail": "Service temporarily unavailable."}` without calling the upstream. After 30 seconds, the next request is sent as a single probe: success closes the circuit, failure reopens it for another 30 seconds.
+
+Set `CIRCUIT_BREAKER_ENABLED=0` to disable the breaker (default `1`). This is mainly for comparison tests.
+
 ## Load tests
 
 [k6](https://k6.io) scripts in `loadtest/` measure the gateway under load. Both use 20 virtual users for 30 seconds:
@@ -225,6 +231,22 @@ Run on November 22, 2026, on an Apple M2 Pro (16 GB RAM) with Docker Engine 25.0
 | slow | 1 s delay | 580 | 0% | 18.8 req/s | 1063 ms | 1084 ms | 1099 ms | 1170 ms |
 
 In the slow scenario, throughput is bounded by the upstream delay: 20 users each waiting about 1 s allow at most about 20 req/s. The median overhead beyond the 1 s delay (about 60 ms) is similar to the fast scenario's median latency. These are single local runs used as a baseline, not performance targets.
+
+### Circuit breaker scenario
+
+`circuit.js` sends 5 req/s to `/api/orders/error/?error_code=500` for 20 s, waits out the 30 s open window, then sends 5 req/s to the healthy `/api/orders/1/` for 10 s. Restart the gateway before each run, because circuit state lives in memory. Count the upstream calls in the order service's access log:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --force-recreate gateway
+k6 run --summary-export=loadtest/results-circuit-on.json loadtest/circuit.js
+docker compose logs order_service --since 2m | grep -c '"GET /v1/orders/error/'
+
+# baseline without the breaker
+CIRCUIT_BREAKER_ENABLED=0 docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --force-recreate gateway
+k6 run --summary-export=loadtest/results-circuit-off.json loadtest/circuit.js
+```
+
+Results and observations are in [docs/m3-findings.md](docs/m3-findings.md).
 
 ## Intentionally unsupported
 

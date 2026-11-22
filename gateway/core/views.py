@@ -63,7 +63,7 @@ class GatewayProxy(APIView):
         return await self._forward(request, cb, upstream_url, headers)
 
     async def _forward(self, request, cb, url, headers):
-        if cb.allow_request():
+        if not settings.CIRCUIT_BREAKER_ENABLED or cb.allow_request():
             client = get_http_client()
             try:
                 upstream_response = await client.request(
@@ -101,7 +101,7 @@ class GatewayProxy(APIView):
                 ),
             )
 
-        return HttpResponse(f"Service temporarily unavailable.", status=503)
+        return Response({"detail": "Service temporarily unavailable."}, status=503)
 
     def build_upstream_url(self, url, path):
         if path and not path.endswith("/"):

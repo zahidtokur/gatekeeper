@@ -140,3 +140,4 @@ UPSTREAM_READ_TIMEOUT = float(os.environ.get("UPSTREAM_READ_TIMEOUT", "5.0"))
 
 RATE_LIMIT_GET = int(os.environ.get("RATE_LIMIT_GET", "30"))
 RATE_LIMIT_POST = int(os.environ.get("RATE_LIMIT_POST", "10"))
+CIRCUIT_BREAKER_ENABLED = os.environ.get("CIRCUIT_BREAKER_ENABLED", "1") == "1"
