@@ -1,0 +1,5 @@
+# Raises the rate limit so load tests are not blocked by 429s.
+services:
+  gateway:
+    environment:
+      RATE_LIMIT_GET: "1000000"

@@ -196,6 +196,36 @@ The gateway has two kinds of tests:
 - `core/tests_e2e.py` (`GatewayE2ETests`) sends real HTTP requests through the running gateway to user_service and order_service. It covers routing, GET query parameters, POST JSON bodies and content types, upstream status forwarding, unknown routes (404), timeouts (504, using the user_service `/v1/users/slow/` endpoint, which waits 6 s, and the order_service `/v1/orders/slow/?seconds=6` endpoint), and forwarding of upstream 500 and 503 responses. These tests need the Docker Compose stack to be running. They are skipped when the gateway is not reachable.
 - In `core/tests.py`, `UpstreamConnectionErrorTests` mocks the upstream client: connection errors and connect timeouts (502), read timeouts (504), and a healthy response (200). These run instantly, without real waits. `FixedWindowRateLimiterConfigTests` checks invalid limiter settings. `GatewayRateLimitTests` mocks the limiters and forwarding to check method selection, client identification, shared limiter usage across services, and rejection responses without contacting Redis or upstream services.
 
+## Load tests
+
+[k6](https://k6.io) scripts in `loadtest/` measure the gateway under load. Both use 20 virtual users for 30 seconds:
+
+- `fast.js`: `GET /api/orders/1/`, a fast, healthy upstream.
+- `slow.js`: `GET /api/orders/slow/?seconds=1`, an upstream delayed by 1 s (`DELAY` env var, below the 5 s read timeout).
+
+Rate limiting is **excluded** from these tests: `docker-compose.loadtest.yml` raises `RATE_LIMIT_GET` to 1,000,000 so the client is not blocked by 429s.
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build
+docker compose exec redis redis-cli FLUSHDB        # reset rate-limit counters
+k6 run --summary-export=loadtest/results-fast.json loadtest/fast.js
+k6 run --summary-export=loadtest/results-slow.json loadtest/slow.js
+docker compose up -d gateway                       # restore the normal rate limit
+```
+
+Without a local k6 install, use Docker instead: `docker run --rm -i --network host grafana/k6 run - < loadtest/fast.js`.
+
+### Baseline results
+
+Run on November 22, 2026, on an Apple M2 Pro (16 GB RAM) with Docker Engine 25.0.3 and k6 v2.4.0; k6 ran on the host against `localhost:8000`. Configuration: 20 virtual users, 30 s, rate limiting excluded, default timeouts. Raw summaries are in `loadtest/results-fast.json` and `loadtest/results-slow.json`.
+
+| Scenario | Upstream behavior | Requests | Errors | Throughput | Median | p90 | p95 | Max |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| fast | Healthy `GET /v1/orders/1/` | 8440 | 0% | 281 req/s | 67 ms | 82 ms | 96 ms | 244 ms |
+| slow | 1 s delay | 580 | 0% | 18.8 req/s | 1063 ms | 1084 ms | 1099 ms | 1170 ms |
+
+In the slow scenario, throughput is bounded by the upstream delay: 20 users each waiting about 1 s allow at most about 20 req/s. The median overhead beyond the 1 s delay (about 60 ms) is similar to the fast scenario's median latency. These are single local runs used as a baseline, not performance targets.
+
 ## Intentionally unsupported
 
 - HTTP methods other than GET and POST
